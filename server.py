@@ -3,17 +3,21 @@ import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QFileDialog, QTextEdit, QMessageBox, QProgressBar,
-                             QTabWidget, QCheckBox, QFrame)
+                             QTabWidget, QCheckBox, QFrame, QListWidget,
+                             QListWidgetItem, QToolButton, QMenu, QAction)
+from PyQt5.QtCore import Qt, QSize
 
 from drop_area import FileDropArea
 from file_transfer import FileTransferWorker
+
+
 class SecureTransferApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Secure File Transfer")
         self.setMinimumSize(800, 600)
 
-        self.selected_file = None
+        self.selected_files = []  # Changed to list for multiple files
         self.init_ui()
 
     def init_ui(self):
@@ -28,8 +32,8 @@ class SecureTransferApp(QMainWindow):
         send_tab = QWidget()
         receive_tab = QWidget()
 
-        tab_widget.addTab(send_tab, "Send File")
-        tab_widget.addTab(receive_tab, "Receive File")
+        tab_widget.addTab(send_tab, "Send Files")  # Updated label
+        tab_widget.addTab(receive_tab, "Receive Files")  # Updated label
 
         # Setup Send tab
         send_layout = QVBoxLayout()
@@ -50,23 +54,45 @@ class SecureTransferApp(QMainWindow):
 
         send_layout.addLayout(server_layout)
 
-        # File drop area (replaces the old file selection)
+        # File drop area
         self.file_drop_area = FileDropArea()
-        self.file_drop_area.fileDropped.connect(self.handle_file_dropped)
+        self.file_drop_area.filesDropped.connect(self.handle_files_dropped)
         send_layout.addWidget(self.file_drop_area)
 
-        # File information display
-        self.file_info_layout = QHBoxLayout()
-        self.file_path_label = QLabel("No file selected")
-        self.file_info_layout.addWidget(self.file_path_label)
+        # Add folder selection button
+        folder_button_layout = QHBoxLayout()
+        folder_button_layout.addStretch()
+        self.select_folder_button = QPushButton("Select Folder")
+        self.select_folder_button.clicked.connect(self.select_folder)
+        folder_button_layout.addWidget(self.select_folder_button)
+        send_layout.addLayout(folder_button_layout)
 
-        # Clear file selection button
-        self.clear_file_button = QPushButton("Clear")
-        self.clear_file_button.clicked.connect(self.clear_file_selection)
-        self.clear_file_button.setVisible(False)  # Hide initially
-        self.file_info_layout.addWidget(self.clear_file_button)
+        # Files list view
+        files_label = QLabel("Selected Files:")
+        send_layout.addWidget(files_label)
 
-        send_layout.addLayout(self.file_info_layout)
+        self.files_list = QListWidget()
+        self.files_list.setMinimumHeight(100)
+        send_layout.addWidget(self.files_list)
+
+        # Buttons for file list management
+        files_buttons_layout = QHBoxLayout()
+        files_buttons_layout.addStretch()
+
+        self.clear_files_button = QPushButton("Clear All")
+        self.clear_files_button.clicked.connect(self.clear_file_selection)
+        self.clear_files_button.setEnabled(False)
+
+        self.remove_file_button = QPushButton("Remove Selected")
+        self.remove_file_button.clicked.connect(self.remove_selected_file)
+        self.remove_file_button.setEnabled(False)
+
+        files_buttons_layout.addWidget(self.remove_file_button)
+        files_buttons_layout.addWidget(self.clear_files_button)
+        send_layout.addLayout(files_buttons_layout)
+
+        # Connect selection changed signal to enable/disable remove button
+        self.files_list.itemSelectionChanged.connect(self.update_remove_button_state)
 
         # Save encrypted checkbox
         save_encrypted_layout = QHBoxLayout()
@@ -78,8 +104,8 @@ class SecureTransferApp(QMainWindow):
         send_layout.addLayout(save_encrypted_layout)
 
         # Send button
-        self.send_button = QPushButton("Send File")
-        self.send_button.clicked.connect(self.send_file)
+        self.send_button = QPushButton("Send Files")  # Updated label
+        self.send_button.clicked.connect(self.send_files)
         self.send_button.setEnabled(False)
         send_layout.addWidget(self.send_button)
 
@@ -187,24 +213,57 @@ class SecureTransferApp(QMainWindow):
         # Status bar
         self.statusBar().showMessage("Ready")
 
-    def handle_file_dropped(self, file_path):
-        self.selected_file = file_path
-        self.file_path_label.setText(os.path.basename(file_path))
-        self.send_button.setEnabled(True)
-        self.log_message("Send", f"Selected file: {file_path}")
+    def handle_files_dropped(self, file_paths):
+        # Add files to the list
+        for file_path in file_paths:
+            if file_path not in self.selected_files:
+                self.selected_files.append(file_path)
+                item_name = os.path.basename(file_path)
+                # If it's a directory, add a suffix
+                if os.path.isdir(file_path):
+                    item_name += " [Folder]"
+                item = QListWidgetItem(item_name)
+                item.setData(Qt.UserRole, file_path)  # Store the full path
+                self.files_list.addItem(item)
 
-        # Show the clear button when a file is selected
-        self.clear_file_button.setVisible(True)
+        self.update_ui_states()
+        self.log_message("Send", f"Added {len(file_paths)} file(s)/folder(s)")
 
-        # Change the drop area text to show file is selected
-        self.file_drop_area.label.setText("File selected - Drop another to change")
+    def select_folder(self):
+        self.file_drop_area.selectFolder()
+
+    def update_ui_states(self):
+        has_files = len(self.selected_files) > 0
+        self.send_button.setEnabled(has_files)
+        self.clear_files_button.setEnabled(has_files)
+        # Update the drop area text
+        if has_files:
+            self.file_drop_area.label.setText("Drop more files/folders or click to add more")
+        else:
+            self.file_drop_area.label.setText("Drop files or folders here or click to select")
+
+    def update_remove_button_state(self):
+        self.remove_file_button.setEnabled(len(self.files_list.selectedItems()) > 0)
+
+    def remove_selected_file(self):
+        selected_items = self.files_list.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            file_path = item.data(Qt.UserRole)
+            row = self.files_list.row(item)
+            self.files_list.takeItem(row)
+            if file_path in self.selected_files:
+                self.selected_files.remove(file_path)
+
+        self.update_ui_states()
+        self.log_message("Send", f"Removed {len(selected_items)} file(s)/folder(s) from selection")
 
     def clear_file_selection(self):
-        self.selected_file = None
-        self.file_path_label.setText("No file selected")
-        self.send_button.setEnabled(False)
-        self.clear_file_button.setVisible(False)
-        self.file_drop_area.label.setText("Drop file here or click to select")
+        self.selected_files = []
+        self.files_list.clear()
+        self.update_ui_states()
         self.log_message("Send", "File selection cleared")
 
     def select_save_directory(self):
@@ -217,7 +276,7 @@ class SecureTransferApp(QMainWindow):
             self.save_dir_label.setText(directory)
             self.log_message("Receive", f"Save directory set to: {directory}")
 
-    def send_file(self):
+    def send_files(self):
         if not self.validate_send_inputs():
             return
 
@@ -227,13 +286,19 @@ class SecureTransferApp(QMainWindow):
 
         self.toggle_send_ui(False)
 
-        self.worker = FileTransferWorker(host, port, self.selected_file, save_encrypted=save_encrypted)
-        self.worker.progress.connect(self.update_send_progress)
-        self.worker.status.connect(lambda msg: self.log_message("Send", msg))
-        self.worker.error.connect(self.handle_send_error)
-        self.worker.finished_transfer.connect(self.handle_send_finished)
+        # Need to modify FileTransferWorker to handle multiple files
+        # For now, we'll just send the first file as a placeholder
+        if self.selected_files:
+            self.worker = FileTransferWorker(host, port, self.selected_files, save_encrypted=save_encrypted)
+            self.worker.progress.connect(self.update_send_progress)
+            self.worker.status.connect(lambda msg: self.log_message("Send", msg))
+            self.worker.error.connect(self.handle_send_error)
+            self.worker.finished_transfer.connect(self.handle_send_finished)
 
-        self.worker.start()
+            self.worker.start()
+        else:
+            self.handle_send_error("No files selected for sending")
+            self.toggle_send_ui(True)
 
     def start_receiving(self):
         if not self.validate_receive_inputs():
@@ -268,8 +333,8 @@ class SecureTransferApp(QMainWindow):
             QMessageBox.warning(self, "Invalid Port", str(e))
             return False
 
-        if not self.selected_file:
-            QMessageBox.warning(self, "No File Selected", "Please select a file to send")
+        if not self.selected_files:
+            QMessageBox.warning(self, "No Files Selected", "Please select at least one file or folder to send")
             return False
 
         return True
@@ -294,9 +359,12 @@ class SecureTransferApp(QMainWindow):
         self.host_input.setEnabled(enabled)
         self.port_input.setEnabled(enabled)
         self.file_drop_area.setEnabled(enabled)
-        self.clear_file_button.setEnabled(enabled)
-        self.send_button.setEnabled(enabled and self.selected_file is not None)
+        self.send_button.setEnabled(enabled and len(self.selected_files) > 0)
         self.save_encrypted_cb.setEnabled(enabled)
+        self.select_folder_button.setEnabled(enabled)
+        self.files_list.setEnabled(enabled)
+        self.clear_files_button.setEnabled(enabled and len(self.selected_files) > 0)
+        self.remove_file_button.setEnabled(enabled and len(self.files_list.selectedItems()) > 0)
 
     def toggle_receive_ui(self, enabled):
         self.receive_host_input.setEnabled(enabled)
@@ -325,7 +393,7 @@ class SecureTransferApp(QMainWindow):
         QMessageBox.information(
             self,
             "Send Complete",
-            f"File '{os.path.basename(self.selected_file)}' has been sent successfully"
+            f"{len(self.selected_files)} file(s)/folder(s) have been sent successfully"
         )
         self.send_progress.setValue(0)
         self.toggle_send_ui(True)
@@ -334,7 +402,7 @@ class SecureTransferApp(QMainWindow):
         QMessageBox.information(
             self,
             "Receive Complete",
-            "File has been received and decrypted successfully"
+            "Files have been received and decrypted successfully"
         )
         self.receive_progress.setValue(0)
         self.toggle_receive_ui(True)

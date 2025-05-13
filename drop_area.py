@@ -1,13 +1,12 @@
 import os
-
-from PyQt5 import Qt
 from PyQt5.QtWidgets import QFileDialog, QVBoxLayout, QFrame, QLabel
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent
 
-# New custom file drop area widget
+
 class FileDropArea(QFrame):
-    fileDropped = pyqtSignal(str)
+    # Change signal to emit a list of file paths
+    filesDropped = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -17,7 +16,7 @@ class FileDropArea(QFrame):
 
         # Setup layout
         layout = QVBoxLayout(self)
-        self.label = QLabel("Drop file here or click to select")
+        self.label = QLabel("Drop files or folders here or click to select")
         self.label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label)
 
@@ -34,20 +33,32 @@ class FileDropArea(QFrame):
 
     def dropEvent(self, event: QDropEvent):
         if event.mimeData().hasUrls():
+            file_paths = []
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
-                # Only accept the first file if multiple are dropped
-                if os.path.isfile(file_path):
-                    self.fileDropped.emit(file_path)
-                    break
+                # Accept both files and folders
+                if os.path.exists(file_path):
+                    file_paths.append(file_path)
 
+            if file_paths:
+                self.filesDropped.emit(file_paths)
         self.setStyleSheet("")
 
     def mousePressEvent(self, event):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select File to Send", os.path.expanduser("~")
+        # Allow selecting multiple files
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Files to Send", os.path.expanduser("~")
         )
 
-        if file_path:
-            self.fileDropped.emit(file_path)
+        if file_paths:
+            self.filesDropped.emit(file_paths)
 
+    def selectFolder(self):
+        """Method to select a folder"""
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Send", os.path.expanduser("~"),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
+
+        if folder_path:
+            self.filesDropped.emit([folder_path])

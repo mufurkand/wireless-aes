@@ -2,6 +2,9 @@ import os
 import socket
 import tempfile
 import traceback
+import zipfile
+import shutil
+from pathlib import Path
 
 from PyQt5.QtCore import pyqtSignal, QThread
 from cryptography.hazmat.backends import default_backend
@@ -16,11 +19,12 @@ class FileTransferWorker(QThread):
     error = pyqtSignal(str)
     finished_transfer = pyqtSignal()
 
-    def __init__(self, host, port, file_path, is_server=False, save_encrypted=True):
+    def __init__(self, host, port, file_paths, is_server=False, save_encrypted=True):
         super().__init__()
         self.host = host
         self.port = port
-        self.file_path = file_path
+        # Can now be a list of paths or a single path (for backward compatibility)
+        self.file_paths = file_paths if isinstance(file_paths, list) else [file_paths]
         self.is_server = is_server
         self.dh = DiffieHellman()
         self.save_encrypted = save_encrypted
@@ -44,6 +48,7 @@ class FileTransferWorker(QThread):
         server_socket = None
         client_socket = None
         temp_encrypted_path = None
+        temp_zip_path = None
 
         try:
             # Create server socket
@@ -77,12 +82,18 @@ class FileTransferWorker(QThread):
             shared_key = self.dh.get_shared_key(client_public_key_data)
             self.status.emit("Secure connection established")
 
-            # Receive file info
-            file_info = client_socket.recv(1024).decode()
-            filename, filesize = file_info.split('<SEPARATOR>')
-            filesize = int(filesize)
+            # Receive transfer info
+            transfer_info = client_socket.recv(2048).decode()
+            parts = transfer_info.split('<SEPARATOR>')
 
-            self.status.emit(f"Receiving file: {filename} ({filesize} bytes)")
+            if len(parts) < 2:
+                raise Exception("Invalid transfer information received")
+
+            archive_name = parts[0]
+            filesize = int(parts[1])
+            num_items = int(parts[2]) if len(parts) > 2 else 1
+
+            self.status.emit(f"Receiving archive: {archive_name} ({filesize} bytes) containing {num_items} items")
 
             # Create temporary file for encrypted data
             temp_encrypted = tempfile.NamedTemporaryFile(delete=False)
@@ -104,19 +115,38 @@ class FileTransferWorker(QThread):
 
             # Save a copy of the encrypted file if requested
             if self.save_encrypted:
-                encrypted_file_path = os.path.join(self.encrypted_dir, f"received.{filename}.encrypted")
+                encrypted_file_path = os.path.join(self.encrypted_dir, f"received.{archive_name}.encrypted")
                 self.status.emit(f"Saving encrypted copy to {encrypted_file_path}")
                 with open(temp_encrypted_path, 'rb') as src, open(encrypted_file_path, 'wb') as dst:
                     dst.write(src.read())
 
+            # Create temporary file for decrypted archive
+            temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+            temp_zip_path = temp_zip.name
+            temp_zip.close()
+
             # Decrypt file
-            output_path = os.path.join(self.file_path, filename)
-            self.status.emit(f"Decrypting file to {output_path}...")
-            self._decrypt_file(temp_encrypted_path, output_path, shared_key)
+            self.status.emit(f"Decrypting received archive...")
+            self._decrypt_file(temp_encrypted_path, temp_zip_path, shared_key)
+
+            # Extract archive to destination folder
+            output_dir = self.file_paths[0]  # First path is the destination directory
+            self.status.emit(f"Extracting files to {output_dir}...")
+
+            # Extract the zip file
+            with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                # Get total size for progress reporting
+                total_size = sum(file.file_size for file in zip_ref.infolist())
+                extracted_size = 0
+
+                for file in zip_ref.infolist():
+                    zip_ref.extract(file, output_dir)
+                    extracted_size += file.file_size
+                    self.progress.emit(int(extracted_size / total_size * 100))
 
             # Send acknowledgment
-            client_socket.sendall(b"FILE_RECEIVED")
-            self.status.emit("File received and decrypted successfully")
+            client_socket.sendall(b"FILES_RECEIVED")
+            self.status.emit(f"Successfully received and extracted {num_items} items")
             self.finished_transfer.emit()
 
         except Exception as e:
@@ -125,6 +155,8 @@ class FileTransferWorker(QThread):
             # Clean up
             if temp_encrypted_path and os.path.exists(temp_encrypted_path):
                 os.unlink(temp_encrypted_path)
+            if temp_zip_path and os.path.exists(temp_zip_path):
+                os.unlink(temp_zip_path)
             if client_socket:
                 client_socket.close()
             if server_socket:
@@ -133,6 +165,7 @@ class FileTransferWorker(QThread):
     def _handle_client_transfer(self):
         client_socket = None
         temp_encrypted_path = None
+        temp_zip_path = None
 
         try:
             # Connect to server
@@ -164,33 +197,56 @@ class FileTransferWorker(QThread):
             shared_key = self.dh.get_shared_key(server_public_key_data)
             self.status.emit("Secure connection established")
 
+            # Create a temporary ZIP archive to bundle all files and folders
+            self.status.emit("Creating archive of selected items...")
+            temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+            temp_zip_path = temp_zip.name
+            temp_zip.close()
+
+            total_files = sum(1 for _ in self._count_files_in_paths(self.file_paths))
+            files_processed = 0
+
+            # Create zip archive of all selected files and folders
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for path in self.file_paths:
+                    self._add_to_zip(zipf, path, "", files_processed, total_files)
+
             # Create temporary file for encrypted data
             temp_encrypted = tempfile.NamedTemporaryFile(delete=False)
             temp_encrypted_path = temp_encrypted.name
             temp_encrypted.close()
 
-            # Encrypt file
-            self.status.emit("Encrypting file...")
-            self._encrypt_file(self.file_path, temp_encrypted_path, shared_key)
+            # Encrypt the zip file
+            self.status.emit("Encrypting archive...")
+            self._encrypt_file(temp_zip_path, temp_encrypted_path, shared_key)
 
             # Save a copy of the encrypted file if requested
             if self.save_encrypted:
-                filename = os.path.basename(self.file_path)
-                encrypted_file_path = os.path.join(self.encrypted_dir, f"sent.{filename}.encrypted")
+                archive_name = "secure_transfer_archive.zip"
+                encrypted_file_path = os.path.join(self.encrypted_dir, f"sent.{archive_name}.encrypted")
                 self.status.emit(f"Saving encrypted copy to {encrypted_file_path}")
                 with open(temp_encrypted_path, 'rb') as src, open(encrypted_file_path, 'wb') as dst:
                     dst.write(src.read())
 
             # Get encrypted file size
             filesize = os.path.getsize(temp_encrypted_path)
-            filename = os.path.basename(self.file_path)
 
-            # Send file info
-            file_info = f"{filename}<SEPARATOR>{filesize}"
-            client_socket.send(file_info.encode())
+            # Create a descriptive archive name
+            if len(self.file_paths) == 1:
+                base_name = os.path.basename(self.file_paths[0])
+                if os.path.isdir(self.file_paths[0]):
+                    archive_name = f"{base_name}_folder.zip"
+                else:
+                    archive_name = f"{base_name}.zip"
+            else:
+                archive_name = "multiple_items.zip"
 
-            # Send encrypted file
-            self.status.emit("Sending encrypted file...")
+            # Send transfer info (name, size, number of items)
+            transfer_info = f"{archive_name}<SEPARATOR>{filesize}<SEPARATOR>{len(self.file_paths)}"
+            client_socket.send(transfer_info.encode())
+
+            # Send encrypted archive
+            self.status.emit("Sending encrypted archive...")
             bytes_sent = 0
             with open(temp_encrypted_path, 'rb') as f:
                 while bytes_sent < filesize:
@@ -204,10 +260,10 @@ class FileTransferWorker(QThread):
 
             # Wait for acknowledgment
             response = client_socket.recv(1024)
-            if response != b"FILE_RECEIVED":
+            if response != b"FILES_RECEIVED":
                 self.status.emit(f"Warning: Unexpected server response: {response}")
 
-            self.status.emit("File sent successfully")
+            self.status.emit(f"Successfully sent {len(self.file_paths)} items")
             self.finished_transfer.emit()
 
         except Exception as e:
@@ -216,8 +272,55 @@ class FileTransferWorker(QThread):
             # Clean up
             if temp_encrypted_path and os.path.exists(temp_encrypted_path):
                 os.unlink(temp_encrypted_path)
+            if temp_zip_path and os.path.exists(temp_zip_path):
+                os.unlink(temp_zip_path)
             if client_socket:
                 client_socket.close()
+
+    def _add_to_zip(self, zipf, path, arcname, files_processed, total_files):
+        """Add file or folder to zip archive with progress tracking"""
+        if os.path.isfile(path):
+            # If it's a file, add it directly
+            if arcname:
+                zipf.write(path, arcname)
+            else:
+                zipf.write(path, os.path.basename(path))
+            files_processed += 1
+            self.progress.emit(int(files_processed / total_files * 100))
+        else:
+            # If it's a directory, add all its contents
+            base_name = os.path.basename(path)
+            for root, dirs, files in os.walk(path):
+                # Calculate relative path from the source directory
+                if arcname:
+                    rel_dir = os.path.join(arcname, os.path.relpath(root, os.path.dirname(path)))
+                else:
+                    rel_dir = os.path.relpath(root, os.path.dirname(path))
+
+                # Add empty directories
+                if not files and not dirs:
+                    zipf.writestr(f"{rel_dir}/", "")
+
+                # Add files
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    if arcname:
+                        arc_file = os.path.join(arcname, os.path.relpath(file_path, os.path.dirname(path)))
+                    else:
+                        arc_file = os.path.relpath(file_path, os.path.dirname(path))
+                    zipf.write(file_path, arc_file)
+                    files_processed += 1
+                    self.progress.emit(int(files_processed / total_files * 100))
+
+    def _count_files_in_paths(self, paths):
+        """Generator to count total files in all paths"""
+        for path in paths:
+            if os.path.isfile(path):
+                yield 1
+            else:
+                for root, _, files in os.walk(path):
+                    for _ in files:
+                        yield 1
 
     def _encrypt_file(self, input_file, output_file, key):
         # Generate IV
