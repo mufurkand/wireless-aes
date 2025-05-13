@@ -453,16 +453,26 @@ class SecureTransferApp(QMainWindow):
         # Status log
         log_label = QLabel("Log:")
         send_layout.addWidget(log_label)
-        
+
         self.send_log = QTextEdit()
         self.send_log.setReadOnly(True)
         send_layout.addWidget(self.send_log)
         
         send_tab.setLayout(send_layout)
-        
+
+        # Clear log button - Send tab
+        self.clear_send_log_button = QPushButton("Clear Log")
+        self.clear_send_log_button.clicked.connect(self.clear_send_log)
+        send_layout.addWidget(self.clear_send_log_button)
+
+        clear_send_layout = QHBoxLayout()
+        clear_send_layout.addStretch()
+        clear_send_layout.addWidget(self.clear_send_log_button)
+        send_layout.addLayout(clear_send_layout)
+
         # Setup Receive tab
         receive_layout = QVBoxLayout()
-        
+
         # Server configuration
         receive_config_layout = QHBoxLayout()
         
@@ -517,9 +527,18 @@ class SecureTransferApp(QMainWindow):
         self.receive_log = QTextEdit()
         self.receive_log.setReadOnly(True)
         receive_layout.addWidget(self.receive_log)
-        
+
+        # Clear log button - Receive tab
+        self.clear_receive_log_button = QPushButton("Clear Log")
+        self.clear_receive_log_button.clicked.connect(self.clear_receive_log)
+        receive_layout.addWidget(self.clear_receive_log_button)
         receive_tab.setLayout(receive_layout)
-        
+
+        clear_receive_layout = QHBoxLayout()
+        clear_receive_layout.addStretch()
+        clear_receive_layout.addWidget(self.clear_receive_log_button)
+        receive_layout.addLayout(clear_receive_layout)
+
         # Add tab widget to main layout
         main_layout.addWidget(tab_widget)
         
@@ -676,6 +695,14 @@ class SecureTransferApp(QMainWindow):
             self.send_log.append(message)
         else:
             self.receive_log.append(message)
+
+    def clear_send_log(self):
+        self.send_log.clear()
+        self.log_message("Send", "Log cleared")
+
+    def clear_receive_log(self):
+        self.receive_log.clear()
+        self.log_message("Receive", "Log cleared")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
