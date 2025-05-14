@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFileDialog, QTextEdit, QMessageBox, QProgressBar,
                              QTabWidget, QCheckBox, QFrame, QListWidget,
                              QListWidgetItem, QToolButton, QMenu, QAction)
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtCore import Qt, QSize, QThread
 
 from drop_area import FileDropArea
 from file_transfer import FileTransferWorker
@@ -316,7 +316,11 @@ class SecureTransferApp(QMainWindow):
             self.receive_button.setEnabled(True)
             self.receive_button.setText("Stop Receiving")
             
-            self.log_message("Receive", f"Server started on {host}:{port}")
+            # Clean up any existing worker
+            self._cleanup_worker()
+                
+            # Create a new worker
+            self.log_message("Receive", f"Starting server on {host}:{port}")
             self.log_message("Receive", "Waiting for incoming connections...")
             
             self.worker = FileTransferWorker(host, port, self.save_dir_label.text(),
@@ -329,15 +333,30 @@ class SecureTransferApp(QMainWindow):
             self.worker.start()
         else:
             # Stop receiving
-            if hasattr(self, 'worker') and self.worker.isRunning():
-                self.log_message("Receive", "Stopping server...")
-                self.worker.terminate()
-                self.worker.wait()
-                self.log_message("Receive", "Server stopped")
-                
+            self._cleanup_worker()
+            
             self.receive_button.setText("Start Receiving")
             self.toggle_receive_ui(True)
             self.receive_progress.setValue(0)
+            
+    def _cleanup_worker(self):
+        """Safely clean up the worker thread"""
+        if hasattr(self, 'worker') and self.worker is not None:
+            try:
+                if self.worker.isRunning():
+                    self.log_message("Receive", "Stopping server...")
+                    self.worker.terminate()
+                    self.worker.wait()
+                    self.log_message("Receive", "Server stopped")
+            except RuntimeError:
+                # Object might already be deleted
+                self.log_message("Receive", "Worker already cleaned up")
+                
+            # Set worker to None to prevent further access
+            self.worker = None
+            
+            # Give the OS a moment to fully release the socket
+            QThread.msleep(500)  # Sleep for 500ms
 
     def start_receiving(self):
         # Legacy method now redirects to toggle_receiving
@@ -411,13 +430,19 @@ class SecureTransferApp(QMainWindow):
 
     def handle_receive_error(self, error_msg):
         self.log_message("Receive", f"ERROR: {error_msg}")
-        QMessageBox.critical(self, "Receive Error", error_msg)
         
-        # Reset the button state but don't toggle the UI if still in receiving mode
+        # Check if we're still in receiving mode before showing error dialog
         if self.receive_button.isChecked():
+            QMessageBox.critical(self, "Receive Error", error_msg)
+            
+            # Reset the button state
             self.receive_button.setChecked(False)
             self.receive_button.setText("Start Receiving")
             
+            # Clean up the worker
+            self._cleanup_worker()
+            
+        # Always re-enable the UI
         self.toggle_receive_ui(True)
 
     def handle_send_finished(self):

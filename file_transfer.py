@@ -4,6 +4,8 @@ import tempfile
 import traceback
 import zipfile
 import shutil
+import struct
+import time
 from pathlib import Path
 
 from PyQt5.QtCore import pyqtSignal, QThread
@@ -29,6 +31,7 @@ class FileTransferWorker(QThread):
         self.dh = DiffieHellman()
         self.save_encrypted = save_encrypted
         self.running = True  # Flag to control continuous server mode
+        self.server_socket = None  # Store the server socket as an instance variable
 
         # Create encrypted directory if it doesn't exist
         self.encrypted_dir = os.path.join(os.getcwd(), "encrypted")
@@ -46,15 +49,41 @@ class FileTransferWorker(QThread):
             self.error.emit(str(e))
 
     def _handle_server_transfer(self):
-        server_socket = None
-        
         try:
             # Create server socket
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((self.host, self.port))
-            server_socket.settimeout(1.0)  # Add timeout to allow checking self.running
-            server_socket.listen(1)
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Set linger option to ensure socket closes immediately
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, 
+                                   struct.pack('ii', 1, 0))
+            
+            # Bind to port with retries
+            bind_attempts = 0
+            max_attempts = 3
+            bound = False
+            
+            while not bound and bind_attempts < max_attempts:
+                try:
+                    bind_attempts += 1
+                    self.server_socket.bind((self.host, self.port))
+                    bound = True
+                except OSError as e:
+                    if bind_attempts >= max_attempts:
+                        self.status.emit(f"Failed to bind to port {self.port} after {max_attempts} attempts")
+                        raise Exception(f"Could not bind to port {self.port}: {str(e)}")
+                    
+                    self.status.emit(f"Port {self.port} busy, waiting for it to be released (attempt {bind_attempts}/{max_attempts})...")
+                    time.sleep(2)  # Wait 2 seconds before retrying
+                    
+                    # Try to close and recreate the socket
+                    self.server_socket.close()
+                    self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, 
+                                           struct.pack('ii', 1, 0))
+                
+            self.server_socket.settimeout(1.0)  # Add timeout to allow checking self.running
+            self.server_socket.listen(1)
             
             self.status.emit(f"Server listening on {self.host}:{self.port}...")
             
@@ -62,7 +91,7 @@ class FileTransferWorker(QThread):
             while self.running:
                 try:
                     # Accept connection with timeout to check self.running periodically
-                    client_socket, addr = server_socket.accept()
+                    client_socket, addr = self.server_socket.accept()
                     self.status.emit(f"Connected to {addr[0]}:{addr[1]}")
                     
                     # Handle this connection
@@ -82,30 +111,69 @@ class FileTransferWorker(QThread):
             if self.running:  # Only report errors if we're still supposed to be running
                 raise Exception(f"Server error: {str(e)}")
         finally:
-            if server_socket:
-                server_socket.close()
+            self._close_server_socket()
+            
+    def _close_server_socket(self):
+        """Safely close the server socket"""
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+                self.status.emit("Server socket closed")
+            except Exception as e:
+                self.status.emit(f"Error closing server socket: {str(e)}")
+            self.server_socket = None
                 
+    def terminate(self):
+        """Terminate the worker thread and clean up resources"""
+        self.status.emit("Terminating worker thread...")
+        self.running = False
+        
+        # Explicitly close server socket if it exists
+        self._close_server_socket()
+        
+        # Give the server socket thread a moment to detect the running flag change
+        # before forcefully terminating the thread
+        self.wait(300)  # Wait for up to 300ms for graceful shutdown
+        super().terminate()
+
     def _handle_client_connection(self, client_socket):
         temp_encrypted_path = None
         temp_zip_path = None
         
         try:
+            # Set a timeout for all operations to prevent hanging
+            client_socket.settimeout(30.0)  # 30 seconds timeout
+            
+            # Generate a fresh key pair for each connection
+            self.dh = DiffieHellman()
+            
             # Exchange public keys
             self.status.emit("Exchanging encryption keys...")
             client_socket.sendall(self.dh.get_public_key_bytes())
+            self.status.emit("Sent server public key")
 
             # The server sends first, then receives
             client_public_key_data = b""
-            while True:
-                data = client_socket.recv(4096)
-                if not data:
-                    break
-                client_public_key_data += data
-                if b"-----END PUBLIC KEY-----" in client_public_key_data:
-                    break
+            start_time = time.time()
+            while time.time() - start_time < 30:  # 30 second timeout for the whole exchange
+                try:
+                    data = client_socket.recv(4096)
+                    if not data:
+                        self.status.emit("Client disconnected during key exchange")
+                        return
+                    client_public_key_data += data
+                    if b"-----END PUBLIC KEY-----" in client_public_key_data:
+                        break
+                except socket.timeout:
+                    self.status.emit("Timeout waiting for client public key")
+                    return
+                except ConnectionResetError:
+                    self.status.emit("Connection reset by client during key exchange")
+                    return
 
             if not client_public_key_data:
-                raise Exception("Failed to receive client public key")
+                self.status.emit("Failed to receive client public key")
+                return
 
             self.status.emit("Computing shared encryption key...")
             shared_key = self.dh.get_shared_key(client_public_key_data)
@@ -189,19 +257,20 @@ class FileTransferWorker(QThread):
             if client_socket:
                 client_socket.close()
                 
-    def terminate(self):
-        self.running = False
-        super().terminate()
-
     def _handle_client_transfer(self):
         client_socket = None
         temp_encrypted_path = None
         temp_zip_path = None
 
         try:
+            # Create a fresh key pair
+            self.dh = DiffieHellman()
+            
             # Connect to server
             self.status.emit(f"Connecting to {self.host}:{self.port}...")
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Set timeout to prevent hanging
+            client_socket.settimeout(30.0)  # 30 seconds timeout
             client_socket.connect((self.host, self.port))
             self.status.emit("Connected to server")
 
@@ -210,19 +279,28 @@ class FileTransferWorker(QThread):
 
             # First receive the server's public key
             server_public_key_data = b""
-            while True:
-                data = client_socket.recv(4096)
-                if not data:
-                    break
-                server_public_key_data += data
-                if b"-----END PUBLIC KEY-----" in server_public_key_data:
-                    break
+            start_time = time.time()
+            while time.time() - start_time < 30:  # 30 second timeout for the whole exchange
+                try:
+                    data = client_socket.recv(4096)
+                    if not data:
+                        raise Exception("Server disconnected during key exchange")
+                    server_public_key_data += data
+                    if b"-----END PUBLIC KEY-----" in server_public_key_data:
+                        break
+                except socket.timeout:
+                    raise Exception("Timeout waiting for server public key")
+                except ConnectionResetError:
+                    raise Exception("Connection reset by server during key exchange")
 
             if not server_public_key_data:
                 raise Exception("Failed to receive server public key")
+                
+            self.status.emit("Received server public key")
 
             # Then send our public key
             client_socket.sendall(self.dh.get_public_key_bytes())
+            self.status.emit("Sent client public key")
 
             self.status.emit("Computing shared encryption key...")
             shared_key = self.dh.get_shared_key(server_public_key_data)
