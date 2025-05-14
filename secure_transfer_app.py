@@ -176,7 +176,8 @@ class SecureTransferApp(QMainWindow):
 
         # Receive button
         self.receive_button = QPushButton("Start Receiving")
-        self.receive_button.clicked.connect(self.start_receiving)
+        self.receive_button.setCheckable(True)
+        self.receive_button.clicked.connect(self.toggle_receiving)
         receive_layout.addWidget(self.receive_button)
 
         # Progress bar
@@ -300,24 +301,48 @@ class SecureTransferApp(QMainWindow):
             self.handle_send_error("No files selected for sending")
             self.toggle_send_ui(True)
 
-    def start_receiving(self):
-        if not self.validate_receive_inputs():
-            return
-
-        host = self.receive_host_input.text()
-        port = int(self.receive_port_input.text())
-        save_encrypted = self.receive_encrypted_cb.isChecked()
-
-        self.toggle_receive_ui(False)
-
-        self.worker = FileTransferWorker(host, port, self.save_dir_label.text(),
+    def toggle_receiving(self):
+        if self.receive_button.isChecked():
+            # Start receiving
+            if not self.validate_receive_inputs():
+                self.receive_button.setChecked(False)
+                return
+                
+            host = self.receive_host_input.text()
+            port = int(self.receive_port_input.text())
+            save_encrypted = self.receive_encrypted_cb.isChecked()
+            
+            self.toggle_receive_ui(False)
+            self.receive_button.setEnabled(True)
+            self.receive_button.setText("Stop Receiving")
+            
+            self.log_message("Receive", f"Server started on {host}:{port}")
+            self.log_message("Receive", "Waiting for incoming connections...")
+            
+            self.worker = FileTransferWorker(host, port, self.save_dir_label.text(),
                                          is_server=True, save_encrypted=save_encrypted)
-        self.worker.progress.connect(self.update_receive_progress)
-        self.worker.status.connect(lambda msg: self.log_message("Receive", msg))
-        self.worker.error.connect(self.handle_receive_error)
-        self.worker.finished_transfer.connect(self.handle_receive_finished)
+            self.worker.progress.connect(self.update_receive_progress)
+            self.worker.status.connect(lambda msg: self.log_message("Receive", msg))
+            self.worker.error.connect(self.handle_receive_error)
+            self.worker.finished_transfer.connect(self.handle_receive_continuous)
+            
+            self.worker.start()
+        else:
+            # Stop receiving
+            if hasattr(self, 'worker') and self.worker.isRunning():
+                self.log_message("Receive", "Stopping server...")
+                self.worker.terminate()
+                self.worker.wait()
+                self.log_message("Receive", "Server stopped")
+                
+            self.receive_button.setText("Start Receiving")
+            self.toggle_receive_ui(True)
+            self.receive_progress.setValue(0)
 
-        self.worker.start()
+    def start_receiving(self):
+        # Legacy method now redirects to toggle_receiving
+        self.receive_button.setChecked(True)
+        self.toggle_receiving()
 
     def validate_send_inputs(self):
         host = self.host_input.text()
@@ -387,6 +412,12 @@ class SecureTransferApp(QMainWindow):
     def handle_receive_error(self, error_msg):
         self.log_message("Receive", f"ERROR: {error_msg}")
         QMessageBox.critical(self, "Receive Error", error_msg)
+        
+        # Reset the button state but don't toggle the UI if still in receiving mode
+        if self.receive_button.isChecked():
+            self.receive_button.setChecked(False)
+            self.receive_button.setText("Start Receiving")
+            
         self.toggle_receive_ui(True)
 
     def handle_send_finished(self):
@@ -398,14 +429,21 @@ class SecureTransferApp(QMainWindow):
         self.send_progress.setValue(0)
         self.toggle_send_ui(True)
 
-    def handle_receive_finished(self):
-        QMessageBox.information(
-            self,
-            "Receive Complete",
-            "Files have been received and decrypted successfully"
-        )
+    def handle_receive_continuous(self):
+        """Handle completed file transfer in continuous mode"""
         self.receive_progress.setValue(0)
-        self.toggle_receive_ui(True)
+        
+        # Only show message box if the button is not checked anymore (stopped)
+        if not self.receive_button.isChecked():
+            QMessageBox.information(
+                self,
+                "Receive Complete",
+                "Files have been received and decrypted successfully"
+            )
+            self.toggle_receive_ui(True)
+        else:
+            # Ready for next transfer
+            self.log_message("Receive", "Transfer complete. Ready for more files...")
 
     def log_message(self, tab, message):
         if tab == "Send":

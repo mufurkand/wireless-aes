@@ -28,6 +28,7 @@ class FileTransferWorker(QThread):
         self.is_server = is_server
         self.dh = DiffieHellman()
         self.save_encrypted = save_encrypted
+        self.running = True  # Flag to control continuous server mode
 
         # Create encrypted directory if it doesn't exist
         self.encrypted_dir = os.path.join(os.getcwd(), "encrypted")
@@ -46,21 +47,49 @@ class FileTransferWorker(QThread):
 
     def _handle_server_transfer(self):
         server_socket = None
-        client_socket = None
-        temp_encrypted_path = None
-        temp_zip_path = None
-
+        
         try:
             # Create server socket
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_socket.bind((self.host, self.port))
+            server_socket.settimeout(1.0)  # Add timeout to allow checking self.running
             server_socket.listen(1)
-
-            self.status.emit(f"Waiting for connection on {self.host}:{self.port}...")
-            client_socket, addr = server_socket.accept()
-            self.status.emit(f"Connected to {addr[0]}:{addr[1]}")
-
+            
+            self.status.emit(f"Server listening on {self.host}:{self.port}...")
+            
+            # Loop to continuously accept connections
+            while self.running:
+                try:
+                    # Accept connection with timeout to check self.running periodically
+                    client_socket, addr = server_socket.accept()
+                    self.status.emit(f"Connected to {addr[0]}:{addr[1]}")
+                    
+                    # Handle this connection
+                    self._handle_client_connection(client_socket)
+                    
+                except socket.timeout:
+                    # This is just to check if we should continue running
+                    continue
+                except Exception as e:
+                    if self.running:  # Only report errors if we're still supposed to be running
+                        self.status.emit(f"Connection error: {str(e)}")
+                        # Continue to accept next connection
+            
+            self.status.emit("Server stopped")
+                
+        except Exception as e:
+            if self.running:  # Only report errors if we're still supposed to be running
+                raise Exception(f"Server error: {str(e)}")
+        finally:
+            if server_socket:
+                server_socket.close()
+                
+    def _handle_client_connection(self, client_socket):
+        temp_encrypted_path = None
+        temp_zip_path = None
+        
+        try:
             # Exchange public keys
             self.status.emit("Exchanging encryption keys...")
             client_socket.sendall(self.dh.get_public_key_bytes())
@@ -150,7 +179,7 @@ class FileTransferWorker(QThread):
             self.finished_transfer.emit()
 
         except Exception as e:
-            raise Exception(f"Server error: {str(e)}")
+            self.status.emit(f"Error processing connection: {str(e)}")
         finally:
             # Clean up
             if temp_encrypted_path and os.path.exists(temp_encrypted_path):
@@ -159,8 +188,10 @@ class FileTransferWorker(QThread):
                 os.unlink(temp_zip_path)
             if client_socket:
                 client_socket.close()
-            if server_socket:
-                server_socket.close()
+                
+    def terminate(self):
+        self.running = False
+        super().terminate()
 
     def _handle_client_transfer(self):
         client_socket = None
