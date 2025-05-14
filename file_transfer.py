@@ -20,6 +20,7 @@ class FileTransferWorker(QThread):
     status = pyqtSignal(str)
     error = pyqtSignal(str)
     finished_transfer = pyqtSignal()
+    chunk_received = pyqtSignal(str, int)
 
     def __init__(self, host, port, file_paths, is_server=False, save_encrypted=True):
         super().__init__()
@@ -199,6 +200,7 @@ class FileTransferWorker(QThread):
 
             # Receive encrypted file
             bytes_received = 0
+            chunk_number = 1
             with open(temp_encrypted_path, 'wb') as f:
                 while bytes_received < filesize:
                     bytes_to_receive = min(4096, filesize - bytes_received)
@@ -209,6 +211,13 @@ class FileTransferWorker(QThread):
                     bytes_received += len(data)
                     progress = int(bytes_received / filesize * 100)
                     self.progress.emit(progress)
+
+                    chunk_number = bytes_received // 4096 + 1
+
+                    if bytes_to_receive<4096:
+                        chunk_number += 1
+
+                    self.chunk_received.emit(archive_name, chunk_number)
 
             # Save a copy of the encrypted file if requested
             if self.save_encrypted:
