@@ -145,6 +145,10 @@ class SecureTransferApp(QMainWindow):
                 border-radius: 6px;
             }
             
+            QCheckBox {
+                color: white;
+            }
+            
             """)
 
         main_widget = QWidget()
@@ -203,6 +207,7 @@ class SecureTransferApp(QMainWindow):
         save_encrypted_layout = QHBoxLayout()
         self.save_encrypted_cb = QCheckBox("Save encrypted version")
         self.save_encrypted_cb.setChecked(True)
+
         save_encrypted_layout.addWidget(self.save_encrypted_cb)
         save_encrypted_layout.addStretch()
         send_layout.addLayout(save_encrypted_layout)
@@ -331,6 +336,7 @@ class SecureTransferApp(QMainWindow):
         receive_encrypted_layout = QHBoxLayout()
         self.receive_encrypted_cb = QCheckBox("Save encrypted version")
         self.receive_encrypted_cb.setChecked(True)
+
         receive_encrypted_layout.addWidget(self.receive_encrypted_cb)
         receive_encrypted_layout.addStretch()
         receive_layout.addLayout(receive_encrypted_layout)
